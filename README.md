@@ -14,3 +14,4 @@ Open <http://localhost:3000/> in your browser.
 - [x] Warmup
 - [x] Async and Await
 - [x] Joining Futures
+- [x] Spawning Tasks
