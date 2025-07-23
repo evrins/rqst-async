@@ -1,8 +1,10 @@
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
-use tokio::join;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
+use tokio::{fs, join};
 
 async fn index(_req: Request) -> Response {
     let content = include_str!("../index.html").to_string();
@@ -19,20 +21,37 @@ struct ChatResponse {
     messages: Vec<String>,
 }
 
-async fn query_chat(messages: &Arc<Vec<String>>) -> Vec<String> {
-    type Payload = (Arc<Vec<String>>, oneshot::Sender<Vec<String>>);
+async fn load_docs(paths: Vec<PathBuf>) -> Vec<String> {
+    let mut doc_futs = paths
+        .into_iter()
+        .map(fs::read_to_string)
+        .collect::<JoinSet<_>>();
 
-    static SENDER: LazyLock<mpsc::Sender<Payload>> = LazyLock::new(|| {
-        let (tx, mut rx) = mpsc::channel::<Payload>(1024);
-        tokio::spawn(async move {
-            let mut chatbot = chatbot::Chatbot::new(vec![":-)".to_string(), "^^".to_string()]);
-            while let Some((messages, responder)) = rx.recv().await {
-                let response = chatbot.query_chat(&messages).await;
-                responder.send(response).unwrap();
-            }
-        });
-        tx
+    let mut docs = Vec::new();
+    while let Some(doc) = doc_futs.join_next().await {
+        docs.push(doc.unwrap().unwrap());
+    }
+
+    docs
+}
+
+type Payload = (Arc<Vec<String>>, oneshot::Sender<Vec<String>>);
+
+fn chatbot_thread() -> mpsc::Sender<Payload> {
+    let (tx, mut rx) = mpsc::channel::<Payload>(1024);
+    tokio::spawn(async move {
+        let mut chatbot = chatbot::Chatbot::new(vec![":-)".to_string(), "^^".to_string()]);
+        while let Some((messages, responder)) = rx.recv().await {
+            let paths = chatbot.retrieval_documents(&messages);
+            let contents = load_docs(paths).await;
+            let response = chatbot.query_chat(&messages, &contents).await;
+            responder.send(response).unwrap();
+        }
     });
+    tx
+}
+async fn query_chat(messages: &Arc<Vec<String>>) -> Vec<String> {
+    static SENDER: LazyLock<mpsc::Sender<Payload>> = LazyLock::new(chatbot_thread);
 
     let (tx, rx) = oneshot::channel();
     SENDER.send((messages.clone(), tx)).await.unwrap();
