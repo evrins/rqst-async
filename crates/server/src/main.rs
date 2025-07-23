@@ -1,5 +1,6 @@
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
+use tokio::join;
 
 async fn index(_req: Request) -> Response {
     let content = include_str!("../index.html").to_string();
@@ -17,20 +18,20 @@ struct ChatResponse {
 }
 
 async fn chat(req: Request) -> Response {
-    if let Request::Post(body) = req {
-        match serde_json::from_str::<ChatRequest>(body.as_str()) {
-            Ok(chat_req) => {
-                let mut messages = chat_req.messages;
-                messages.push("And how does that make you feel?".to_string());
-                let chat_resp = ChatResponse { messages };
-                let response = serde_json::to_string(&chat_resp).unwrap();
-                Ok(Content::Json(response))
-            }
-            Err(_) => Err(http::StatusCode::BAD_REQUEST),
-        }
-    } else {
-        Err(http::StatusCode::BAD_REQUEST)
-    }
+    let Request::Post(body) = req else {
+        return Err(http::StatusCode::METHOD_NOT_ALLOWED);
+    };
+
+    let Ok(chat_req) = serde_json::from_str::<ChatRequest>(body.as_str()) else {
+        return Err(http::StatusCode::INTERNAL_SERVER_ERROR);
+    };
+
+    let mut messages = chat_req.messages;
+    let (generated, idx) = join!(chatbot::query_chat(&messages), chatbot::gen_random_number());
+    messages.push(generated[idx % generated.len()].clone());
+    let chat_resp = ChatResponse { messages };
+    let response = serde_json::to_string(&chat_resp).unwrap();
+    Ok(Content::Json(response))
 }
 
 #[tokio::main]
