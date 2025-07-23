@@ -1,7 +1,7 @@
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
 
-fn index(_req: Request) -> Response {
+async fn index(_req: Request) -> Response {
     let content = include_str!("../index.html").to_string();
     Ok(Content::Html(content))
 }
@@ -16,7 +16,7 @@ struct ChatResponse {
     messages: Vec<String>,
 }
 
-fn chat(req: Request) -> Response {
+async fn chat(req: Request) -> Response {
     if let Request::Post(body) = req {
         match serde_json::from_str::<ChatRequest>(body.as_str()) {
             Ok(chat_req) => {
@@ -33,9 +33,11 @@ fn chat(req: Request) -> Response {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     miniserve::Server::new()
         .route("/", index)
         .route("/chat", chat)
         .run()
+        .await
 }
