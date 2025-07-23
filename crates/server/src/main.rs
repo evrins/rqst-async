@@ -1,5 +1,6 @@
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::join;
 
 async fn index(_req: Request) -> Response {
@@ -26,9 +27,19 @@ async fn chat(req: Request) -> Response {
         return Err(http::StatusCode::INTERNAL_SERVER_ERROR);
     };
 
-    let mut messages = chat_req.messages;
-    let (generated, idx) = join!(chatbot::query_chat(&messages), chatbot::gen_random_number());
-    messages.push(generated[idx % generated.len()].clone());
+    let messages = Arc::new(chat_req.messages);
+
+    let messages_clone = messages.clone();
+    let (generated, idx) = join!(
+        tokio::spawn(async move { chatbot::query_chat(&messages_clone).await }),
+        chatbot::gen_random_number()
+    );
+
+    let generated = generated.unwrap();
+    let new_message = generated[idx % generated.len()].clone();
+    let mut messages = Arc::into_inner(messages).unwrap();
+    messages.push(new_message);
+
     let chat_resp = ChatResponse { messages };
     let response = serde_json::to_string(&chat_resp).unwrap();
     Ok(Content::Json(response))
