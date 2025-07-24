@@ -18,3 +18,4 @@ Open <http://localhost:3000/> in your browser.
 - [x] Message Passing
 - [x] Waiting on Many Futures
 - [x] Selecting Between Futures
+- [x] Pinning Futures
