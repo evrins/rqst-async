@@ -1,13 +1,12 @@
+mod stateful;
+
+use crate::stateful::{StatefulFunction, StatefulThread};
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::pin::pin;
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
-use tokio::time::Instant;
-use tokio::{fs, join, select};
+use tokio::{fs, join};
 
 async fn index(_req: Request) -> Response {
     let content = include_str!("../index.html").to_string();
@@ -31,59 +30,53 @@ async fn load_docs(paths: Vec<PathBuf>) -> Vec<String> {
         .into_iter()
         .map(fs::read_to_string)
         .collect::<JoinSet<_>>();
-
     let mut docs = Vec::new();
-    while let Some(doc) = doc_futs.join_next().await {
-        docs.push(doc.unwrap().unwrap());
+    while let Some(result) = doc_futs.join_next().await {
+        docs.push(result.unwrap().unwrap());
     }
-
     docs
 }
 
-type Payload = (Arc<Vec<String>>, oneshot::Sender<Option<Vec<String>>>);
-
-fn chatbot_thread() -> (mpsc::Sender<Payload>, mpsc::Sender<()>) {
-    let (request_tx, mut request_rx) = mpsc::channel::<Payload>(1024);
-    let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        let mut cb = chatbot::Chatbot::new(vec![":-)".to_string(), "^^".to_string()]);
-        while let Some((messages, responder)) = request_rx.recv().await {
-            let paths = cb.retrieval_documents(&messages);
-            let contents = load_docs(paths).await;
-            let mut chat_fut = pin!(cb.query_chat(&messages, &contents));
-            let mut cancel_fut = pin!(cancel_rx.recv());
-            let start = Instant::now();
-            loop {
-                let log_fut = tokio::time::sleep(Duration::from_secs(1));
-                select! {
-                    response = &mut chat_fut => {
-                        responder.send(Some(response)).unwrap();
-                        break;
-                    }
-                    _ = &mut cancel_fut => {
-                        responder.send(None).unwrap();
-                        break;
-                    }
-                    _ = log_fut => {
-                        println!("Waiting for {} seconds", start.elapsed().as_secs());
-                    }
-                }
-            }
-        }
-    });
-    (request_tx, cancel_tx)
+struct LogFunction {
+    logger: chatbot::Logger,
 }
 
-static CHATBOT_THREAD: LazyLock<(mpsc::Sender<Payload>, mpsc::Sender<()>)> =
-    LazyLock::new(chatbot_thread);
+impl StatefulFunction for LogFunction {
+    type Input = Arc<Vec<String>>;
+    type Output = ();
 
-async fn query_chat(messages: &Arc<Vec<String>>) -> Option<Vec<String>> {
-    let (tx, rx) = oneshot::channel();
-
-    CHATBOT_THREAD.0.send((messages.clone(), tx)).await.unwrap();
-
-    rx.await.unwrap()
+    async fn call(&mut self, messages: Self::Input) -> Self::Output {
+        self.logger.append(messages.last().unwrap());
+        self.logger.save().await.unwrap();
+    }
 }
+
+static LOG_THREAD: LazyLock<StatefulThread<LogFunction>> = LazyLock::new(|| {
+    StatefulThread::new(LogFunction {
+        logger: chatbot::Logger::default(),
+    })
+});
+
+struct ChatbotFunction {
+    chatbot: chatbot::Chatbot,
+}
+
+impl StatefulFunction for ChatbotFunction {
+    type Input = Arc<Vec<String>>;
+    type Output = Vec<String>;
+
+    async fn call(&mut self, messages: Self::Input) -> Self::Output {
+        let doc_paths = self.chatbot.retrieval_documents(&messages);
+        let docs = load_docs(doc_paths).await;
+        self.chatbot.query_chat(&messages, &docs).await
+    }
+}
+
+static CHATBOT_THREAD: LazyLock<StatefulThread<ChatbotFunction>> = LazyLock::new(|| {
+    StatefulThread::new(ChatbotFunction {
+        chatbot: chatbot::Chatbot::new(vec![":-)".into(), "^^".into()]),
+    })
+});
 
 async fn chat(req: Request) -> Response {
     let Request::Post(body) = req else {
@@ -96,7 +89,11 @@ async fn chat(req: Request) -> Response {
 
     let messages = Arc::new(chat_req.messages);
 
-    let (generated, idx) = join!(query_chat(&messages), chatbot::gen_random_number());
+    let (generated, idx, _) = join!(
+        CHATBOT_THREAD.call(messages.clone()),
+        chatbot::gen_random_number(),
+        LOG_THREAD.call(messages.clone()),
+    );
 
     let chat_resp = match generated {
         Some(generated_messages) => {
@@ -113,7 +110,7 @@ async fn chat(req: Request) -> Response {
 }
 
 async fn cancel(_req: Request) -> Response {
-    CHATBOT_THREAD.1.send(()).await.unwrap();
+    CHATBOT_THREAD.cancel().await;
 
     Ok(Content::Html("success".into()))
 }
