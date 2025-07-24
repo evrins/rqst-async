@@ -19,3 +19,4 @@ Open <http://localhost:3000/> in your browser.
 - [x] Waiting on Many Futures
 - [x] Selecting Between Futures
 - [x] Pinning Futures
+- [x] Async Abstractions
