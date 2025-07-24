@@ -1,9 +1,12 @@
 use miniserve::{http, Content, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio::{fs, join, select};
 
 async fn index(_req: Request) -> Response {
@@ -47,14 +50,23 @@ fn chatbot_thread() -> (mpsc::Sender<Payload>, mpsc::Sender<()>) {
         while let Some((messages, responder)) = request_rx.recv().await {
             let paths = cb.retrieval_documents(&messages);
             let contents = load_docs(paths).await;
-            let chat_fut = cb.query_chat(&messages, &contents);
-            let cancel_fut = cancel_rx.recv();
-            select! {
-                response = chat_fut => {
-                    responder.send(Some(response)).unwrap();
-                }
-                _ = cancel_fut => {
-                    responder.send(None).unwrap();
+            let mut chat_fut = pin!(cb.query_chat(&messages, &contents));
+            let mut cancel_fut = pin!(cancel_rx.recv());
+            let start = Instant::now();
+            loop {
+                let log_fut = tokio::time::sleep(Duration::from_secs(1));
+                select! {
+                    response = &mut chat_fut => {
+                        responder.send(Some(response)).unwrap();
+                        break;
+                    }
+                    _ = &mut cancel_fut => {
+                        responder.send(None).unwrap();
+                        break;
+                    }
+                    _ = log_fut => {
+                        println!("Waiting for {} seconds", start.elapsed().as_secs());
+                    }
                 }
             }
         }
